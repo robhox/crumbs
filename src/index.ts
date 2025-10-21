@@ -15,59 +15,70 @@ const log = pino({
 const LIMIT = parseInt(process.env.SCAN_LIMIT || "50", 10);
 
 async function scanProgram(programAddr: string) {
-  const sigs = await getSignaturesForAddress(programAddr, LIMIT);
-  for (const s of sigs) {
-    const sig = s.signature || s; // compat
-    // Skip si déjà connu
-    const exists = await prisma.transaction.findUnique({
-      where: { signature: sig },
-    });
-    if (exists) continue;
+  const signatures = await getSignaturesForAddress(programAddr, LIMIT);
+  if (!Array.isArray(signatures) || signatures.length === 0) {
+    return;
+  }
 
-    const raw = await getTransaction(sig);
-    const parsed = parseTx(sig, raw);
-    if (!parsed) continue;
+  for (const entry of signatures) {
+    const sig = typeof entry === "string" ? entry : entry?.signature;
+    if (!sig) continue;
 
-    const { logs, preTokenBalances, postTokenBalances, protocols } = parsed;
-    const swapCount = parsed.protocols?.length ?? 0;
+    try {
+      const exists = await prisma.transaction.findUnique({
+        where: { signature: sig },
+      });
+      if (exists) continue;
 
-    const isArbLike =
-      (hasFlashloan(logs) && hasRepay(logs) && swapCount >= 2) ||
-      swapCount >= 3; // heuristique permissive pour capter + large
+      const raw = await getTransaction(sig);
+      const parsed = parseTx(sig, raw);
+      if (!parsed) continue;
 
-    if (!isArbLike) continue;
+      const { logs, preTokenBalances, postTokenBalances, protocols, tokens } = parsed;
+      const swapCount = protocols.length;
 
-    // Profit (USDC-only v1)
-    const deltaUsdc = calcUsdcDelta(preTokenBalances, postTokenBalances);
-    const profitUsd = deltaUsdc; // ~1 USDC ≈ 1 USD
+      const isArbLike =
+        (hasFlashloan(logs) && hasRepay(logs) && swapCount >= 2) ||
+        swapCount >= 3; // heuristique permissive pour capter + large
 
-    const patternHash = hashPattern(protocols);
+      if (!isArbLike) continue;
 
-    await prisma.transaction.create({
-      data: {
-        signature: parsed.signature,
-        slot: parsed.slot,
-        timestamp: new Date(parsed.blockTime * 1000),
-        wallet: parsed.wallet,
-        protocols,
-        tokens: ["USDC"],
-        profitUsd,
-        computeUnits: parsed.computeUnits,
-        priorityFee: parsed.priorityFee,
-        patternHash,
-      },
-    });
+      const deltaUsdc = calcUsdcDelta(preTokenBalances, postTokenBalances);
+      const profitUsd = Number.isFinite(deltaUsdc) ? deltaUsdc : 0;
+      const patternHash = hashPattern(protocols);
 
-    log.info(
-      {
-        sig: parsed.signature,
-        profitUsd: profitUsd.toFixed(4),
-        cu: parsed.computeUnits,
-        pf: parsed.priorityFee,
-        protocols,
-      },
-      "Stored arbitrage-like tx",
-    );
+      await prisma.transaction.create({
+        data: {
+          signature: parsed.signature,
+          slot: parsed.slot,
+          timestamp: new Date(parsed.blockTime * 1000),
+          wallet: parsed.wallet,
+          protocols,
+          tokens,
+          profitUsd,
+          computeUnits: parsed.computeUnits,
+          priorityFee: parsed.priorityFee,
+          patternHash,
+        },
+      });
+
+      log.info(
+        {
+          sig: parsed.signature,
+          profitUsd: profitUsd.toFixed(4),
+          cu: parsed.computeUnits,
+          pf: parsed.priorityFee,
+          protocols,
+        },
+        "Stored arbitrage-like tx",
+      );
+    } catch (error: unknown) {
+      const err =
+        error instanceof Error
+          ? { message: error.message, stack: error.stack }
+          : { value: error };
+      log.warn({ err, sig }, "Failed to process signature");
+    }
   }
 }
 
@@ -84,10 +95,17 @@ async function main() {
   }
 
   log.info("Scan terminé ✅");
-  process.exit(0);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+main()
+  .catch((error: unknown) => {
+    const err =
+      error instanceof Error
+        ? { message: error.message, stack: error.stack }
+        : { value: error };
+    log.error({ err }, "Scan failed");
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await prisma.$disconnect().catch(() => undefined);
+  });

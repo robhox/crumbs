@@ -3,15 +3,25 @@ version: "3.9"
 services:
   postgres:
     image: postgres:16
-    container_name: local_postgres
+    container_name: mev_postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: app_db
+      POSTGRES_USER: explorer
+      POSTGRES_PASSWORD: explorer
+      POSTGRES_DB: mev
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+
+  adminer:
+    image: adminer:4
+    container_name: mev_adminer
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
 
 volumes:
   pgdata:
