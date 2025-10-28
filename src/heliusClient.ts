@@ -25,12 +25,26 @@ export async function getSignaturesForAddress(address: string, limit: number) {
   });
 }
 
+// export async function getTransaction(signature: string) {
+//   return rpc<any>({
+//     method: "getTransaction",
+//     params: [
+//       signature,
+//       { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
+//     ],
+//   });
+// }
+
 export async function getTransaction(signature: string) {
-  return rpc<any>({
-    method: "getTransaction",
-    params: [
-      signature,
-      { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
-    ],
-  });
+  const res = await fetch(
+    `https://api.helius.xyz/v0/transactions?api-key=${process.env.HELIUS_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transactions: [signature] }),
+    },
+  );
+
+  const json = await res.json();
+  return json[0];
 }

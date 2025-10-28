@@ -14,3 +14,8 @@ export function hashPattern(programIds: string[]): string {
   const s = programIds.join(">");
   return crypto.createHash("sha256").update(s).digest("hex").slice(0, 16);
 }
+
+export function numberOfSwap(logs: string[]): number {
+  const t = logs.join(" ").toLowerCase();
+  return t.split("transfer").length - 1;
+}

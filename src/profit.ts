@@ -1,4 +1,4 @@
-import { USDC_MINT } from "./constants";
+import { SOL_MINT, USDC_MINT } from "./constants";
 import type { TokenBalance } from "./parser";
 
 /**
@@ -23,7 +23,10 @@ const extractUiAmount = (balance: TokenBalance | undefined): number => {
     if (Number.isFinite(num)) return num;
   }
 
-  if (typeof amount.amount === "string" && typeof amount.decimals === "number") {
+  if (
+    typeof amount.amount === "string" &&
+    typeof amount.decimals === "number"
+  ) {
     const raw = Number(amount.amount);
     if (Number.isFinite(raw)) {
       return raw / Math.pow(10, amount.decimals);
@@ -33,8 +36,28 @@ const extractUiAmount = (balance: TokenBalance | undefined): number => {
   return 0;
 };
 
-export function calcUsdcDelta(pre: TokenBalance[], post: TokenBalance[]): number {
-  const preUsdc = extractUiAmount(pre.find((balance) => balance.mint === USDC_MINT));
-  const postUsdc = extractUiAmount(post.find((balance) => balance.mint === USDC_MINT));
+export function calcUsdcDelta(
+  pre: TokenBalance[],
+  post: TokenBalance[],
+): number {
+  const preUsdc = extractUiAmount(
+    pre.find((balance) => balance.mint === USDC_MINT),
+  );
+  const postUsdc = extractUiAmount(
+    post.find((balance) => balance.mint === USDC_MINT),
+  );
   return postUsdc - preUsdc;
+}
+
+export function calcSolDelta(
+  pre: TokenBalance[],
+  post: TokenBalance[],
+): number {
+  const preSol = extractUiAmount(
+    pre.find((balance) => balance.mint === SOL_MINT),
+  );
+  const postSol = extractUiAmount(
+    post.find((balance) => balance.mint === SOL_MINT),
+  );
+  return postSol - preSol;
 }

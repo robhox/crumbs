@@ -57,7 +57,10 @@ const normaliseAccountKeys = (keys: unknown): string[] => {
     .filter((key): key is string => Boolean(key));
 };
 
-const extractProgramId = (instruction: unknown, accountKeys: string[]): string | null => {
+const extractProgramId = (
+  instruction: unknown,
+  accountKeys: string[],
+): string | null => {
   if (!instruction || typeof instruction !== "object") return null;
   const ix = instruction as Record<string, unknown>;
   const direct = toStringSafe(ix.programId ?? ix.programIdRaw);
@@ -74,7 +77,10 @@ const extractProgramId = (instruction: unknown, accountKeys: string[]): string |
   return null;
 };
 
-const collectProgramIds = (instructions: unknown, accountKeys: string[]): string[] => {
+const collectProgramIds = (
+  instructions: unknown,
+  accountKeys: string[],
+): string[] => {
   if (!Array.isArray(instructions)) return [];
   const ids = new Set<string>();
   for (const instruction of instructions) {
@@ -100,14 +106,22 @@ export function parseTx(signature: string, raw: any): ParsedTx | null {
   const message = raw.transaction?.message;
   const meta = raw.meta;
   if (!message || !meta) return null;
+  const innerInstructions =
+    meta.innerInstructions.map((i) => i.instructions) ?? [];
+  console.log("innerInstructions:", innerInstructions);
 
   const accountKeys = normaliseAccountKeys(message.accountKeys);
   const wallet = accountKeys[0] ?? "unknown";
   const logs = Array.isArray(meta.logMessages) ? meta.logMessages : [];
-  const computeUnits = typeof meta.computeUnitsConsumed === "number" ? meta.computeUnitsConsumed : 0;
+  const computeUnits =
+    typeof meta.computeUnitsConsumed === "number"
+      ? meta.computeUnitsConsumed
+      : 0;
 
   const preBalances = Array.isArray(meta.preBalances) ? meta.preBalances : [];
-  const postBalances = Array.isArray(meta.postBalances) ? meta.postBalances : [];
+  const postBalances = Array.isArray(meta.postBalances)
+    ? meta.postBalances
+    : [];
   const lamportsSpent =
     typeof preBalances[0] === "number" && typeof postBalances[0] === "number"
       ? preBalances[0] - postBalances[0]
@@ -115,16 +129,26 @@ export function parseTx(signature: string, raw: any): ParsedTx | null {
   const priorityFee = lamportsSpent / LAMPORTS_PER_SOL;
 
   const parsedProgramIds = collectProgramIds(message.instructions, accountKeys);
-  const compiledProgramIds = collectProgramIds(message.compiledInstructions, accountKeys);
-  const protocols = Array.from(new Set([...parsedProgramIds, ...compiledProgramIds]));
+  const compiledProgramIds = collectProgramIds(
+    message.compiledInstructions,
+    accountKeys,
+  );
+  const protocols = Array.from(
+    new Set([...parsedProgramIds, ...compiledProgramIds]),
+  );
 
   const preTokenBalances: TokenBalance[] = Array.isArray(meta.preTokenBalances)
     ? meta.preTokenBalances
     : [];
-  const postTokenBalances: TokenBalance[] = Array.isArray(meta.postTokenBalances)
+  const postTokenBalances: TokenBalance[] = Array.isArray(
+    meta.postTokenBalances,
+  )
     ? meta.postTokenBalances
     : [];
-  const tokenSet = collectTokenMints([...preTokenBalances, ...postTokenBalances]);
+  const tokenSet = collectTokenMints([
+    ...preTokenBalances,
+    ...postTokenBalances,
+  ]);
   if (tokenSet.length === 0) {
     tokenSet.push(USDC_MINT);
   }

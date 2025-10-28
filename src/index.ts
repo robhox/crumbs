@@ -4,8 +4,9 @@ import { prisma } from "./db";
 import { getSignaturesForAddress, getTransaction } from "./heliusClient";
 import { PROGRAMS } from "./constants";
 import { parseTx } from "./parser";
-import { hasFlashloan, hasRepay, hashPattern } from "./detector";
-import { calcUsdcDelta } from "./profit";
+import { hasFlashloan, hasRepay, hashPattern, numberOfSwap } from "./detector";
+import { calcSolDelta, calcUsdcDelta } from "./profit";
+import { USDC_MINT, SOL_MINT } from "./constants";
 
 const log = pino({
   transport: { target: "pino-pretty" },
@@ -19,7 +20,6 @@ async function scanProgram(programAddr: string) {
   if (!Array.isArray(signatures) || signatures.length === 0) {
     return;
   }
-
   for (const entry of signatures) {
     const sig = typeof entry === "string" ? entry : entry?.signature;
     if (!sig) continue;
@@ -30,35 +30,37 @@ async function scanProgram(programAddr: string) {
       });
       if (exists) continue;
 
-      const raw = await getTransaction(sig);
-      const parsed = parseTx(sig, raw);
+      const parsed = await getTransaction(sig);
       if (!parsed) continue;
 
-      const { logs, preTokenBalances, postTokenBalances, protocols, tokens } = parsed;
-      const swapCount = protocols.length;
+      const { tokenTransfers } = parsed;
+      if (!tokenTransfers || tokenTransfers.length === 0) continue;
 
-      const isArbLike =
-        (hasFlashloan(logs) && hasRepay(logs) && swapCount >= 2) ||
-        swapCount >= 3; // heuristique permissive pour capter + large
+      const usdcTx = tokenTransfers.filter((t) => t.mint === USDC_MINT);
 
+      if (usdcTx.length !== 2) continue;
+
+      const deltaUsdc = usdcTx[1].tokenAmount - usdcTx[0].tokenAmount;
+      const profitUsd = Number.isFinite(deltaUsdc) ? deltaUsdc : 0;
+      const isArbLike = profitUsd > 0;
       if (!isArbLike) continue;
 
-      const deltaUsdc = calcUsdcDelta(preTokenBalances, postTokenBalances);
-      const profitUsd = Number.isFinite(deltaUsdc) ? deltaUsdc : 0;
-      const patternHash = hashPattern(protocols);
+      // const patternHash = hashPattern(protocols);
+
+      console.log("Found arbitrage-like transaction");
 
       await prisma.transaction.create({
         data: {
           signature: parsed.signature,
           slot: parsed.slot,
-          timestamp: new Date(parsed.blockTime * 1000),
-          wallet: parsed.wallet,
-          protocols,
-          tokens,
+          timestamp: new Date(parsed.timestamp),
+          wallet: parsed.feePayer,
+          protocols: [],
+          tokens: [],
           profitUsd,
-          computeUnits: parsed.computeUnits,
-          priorityFee: parsed.priorityFee,
-          patternHash,
+          computeUnits: 0,
+          priorityFee: parsed.fee,
+          patternHash: "",
         },
       });
 
@@ -68,7 +70,7 @@ async function scanProgram(programAddr: string) {
           profitUsd: profitUsd.toFixed(4),
           cu: parsed.computeUnits,
           pf: parsed.priorityFee,
-          protocols,
+          // protocols,
         },
         "Stored arbitrage-like tx",
       );
