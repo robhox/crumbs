@@ -57,7 +57,7 @@ async function jitoRpc<T = any>(
   params: any[] = [],
   id = 1,
   uri: string | null = null,
-  uuid = "b4d77ff1-6464-4cc6-be3a-3c6d702329cd",
+  uuid = "8d361180-b599-11f0-8efd-f957e10bfefe",
 ): Promise<T> {
   console.log("caall wil methoid", method);
   const res = await fastFetch(`${JITO_URL}${uri ? uri : method}?uuid=${uuid}`, {
@@ -213,7 +213,7 @@ let TIP_ACCOUNTS: string[] = [];
 async function warmTipAccounts() {
   TIP_ACCOUNTS = await getTipAccounts();
   log.info("✅ Jito tip accounts prêt");
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  await new Promise((resolve) => setTimeout(resolve, 1000));
 }
 
 // ========= UTIL =========
@@ -227,6 +227,48 @@ function toInstruction(obj: any): TransactionInstruction | null {
   }));
   const data = Buffer.from(obj.data, "base64");
   return new TransactionInstruction({ programId, keys, data });
+}
+
+/**
+ * Construit une transaction atomique Jupiter combinant deux swaps.
+ * Filtre les instructions dupliquées interdites (ComputeBudget, ATA setup, cleanup, etc.).
+ */
+export function buildAtomicSwapTx(
+  resp1: any,
+  resp2: any,
+  inAmount: number,
+  outAmount: number,
+): TransactionInstruction | null {
+  const tx = new Transaction();
+
+  // 🔹 Étape 1 : Compute Budget (on garde seulement celui du premier swap)
+  const computeIxs = (resp1.computeBudgetInstructions || [])
+    .map(toInstruction)
+    .filter(Boolean);
+  for (const ix of computeIxs) tx.add(ix as TransactionInstruction);
+
+  // 🔹 Étape 2 : mix both swaps
+  const decoded: any = decodeInstruction(
+    Buffer.from(resp1.swapInstruction?.data, "base64"),
+  );
+  const swap_id = decoded?.data?.route_plan[0]?.swap?.HumidiFi?.swap_id;
+  const modifiedData = encodeInstruction(swap_id, inAmount, outAmount);
+  resp1.swapInstruction.data = modifiedData.toString("base64");
+
+  resp1.swapInstruction.accounts = [
+    ...resp1.swapInstruction.accounts,
+    ...resp2.swapInstruction.accounts.slice(9),
+    {
+      pubkey: new PublicKey("jitodontfront111111111111111111111111111123"),
+      isSigner: false,
+      isWritable: false,
+    },
+  ];
+
+  const swap = toInstruction(resp1.swapInstruction);
+  if (swap) tx.add(swap);
+
+  return swap;
 }
 
 // ========= QUOTES =========
@@ -268,21 +310,13 @@ async function sendArbBundle(
   connection: Connection,
   wallet: Keypair,
   humidiSwapIx: TransactionInstruction,
-  tessSwapIx: TransactionInstruction,
   lamportsTip: number,
 ) {
   // vtx 1: HumidiFi
   const vtx1 = await buildV0Tx(connection, wallet, [
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 }),
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 3000 }),
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 125_000 }),
+    // ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 3000 }),
     humidiSwapIx,
-  ]);
-
-  // vtx 2: TesseraV
-  const vtx2 = await buildV0Tx(connection, wallet, [
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 }),
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 3000 }),
-    tessSwapIx,
   ]);
 
   // vtx 3: TIP → compte Jito
@@ -299,25 +333,16 @@ async function sendArbBundle(
   const tipVtx = await buildV0Tx(connection, wallet, [tipIx]);
 
   // Bundle: ordre = exécution
-  const bundle = [serializeB64(vtx1), serializeB64(vtx2), serializeB64(tipVtx)];
+  const bundle = [serializeB64(vtx1), serializeB64(tipVtx)];
   const bundleId = await sendBundle(bundle);
   log.info(`🧨 bundle sent: ${bundleId}`);
-
-  // Optionnel: check status (non bloquant)
-  try {
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    const statuses = await getBundleStatuses([bundleId]);
-    log.info({ statuses }, "📦 bundle statuses");
-  } catch {
-    // silencieux, certains endpoints ne l'implémentent pas
-  }
 }
 
 // ========= MAIN ARB CHECK =========
 async function checkArb(connection: Connection, wallet: Keypair) {
   const t0 = performance.now();
 
-  const amountInUSDC = 0.1 * USDC_DECIMALS;
+  const amountInUSDC = 10 * USDC_DECIMALS;
 
   // 1) Quote USDC->SOL via HumidiFi
   const q1 = await getJupQuote(USDC_MINT, SOL_MINT, amountInUSDC, "HumidiFi");
@@ -333,13 +358,13 @@ async function checkArb(connection: Connection, wallet: Keypair) {
   const profit = Number(q2.outAmount) - Number(q1.inAmount);
 
   const t1 = performance.now();
-  // if (profit <= 999) {
-  //   log.info(
-  //     `📉 Arbitrage négatif, stop here (${(profit / USDC_DECIMALS).toFixed(6)}$)`,
-  //   );
-  //   if (t1 - t0 > 200) log.debug?.(`no-op in ${(t1 - t0).toFixed(1)}ms`);
-  //   return;
-  // }
+  if (profit <= 100) {
+    log.info(
+      `📉 Arbitrage négatif, stop here (${(profit / USDC_DECIMALS).toFixed(6)}$)`,
+    );
+    if (t1 - t0 > 200) log.debug?.(`no-op in ${(t1 - t0).toFixed(1)}ms`);
+    return;
+  }
   log.info(
     `💡 Arbitrage détecté: $${(profit / USDC_DECIMALS).toFixed(6)} | compute ${(t1 - t0).toFixed(1)}ms`,
   );
@@ -353,31 +378,40 @@ async function checkArb(connection: Connection, wallet: Keypair) {
       body: JSON.stringify({
         userPublicKey: wallet.publicKey.toBase58(),
         quoteResponse: q1,
+        prioritizationFeeLamports: {
+          priorityLevelWithMaxLamports: {
+            maxLamports: 0,
+            priorityLevel: "medium",
+            global: false,
+          },
+        },
       }),
     }).then((r) => r.json()),
-    fastFetch("https://lite-api.jup.ag/swap/v1/swap-instructions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        userPublicKey: wallet.publicKey.toBase58(),
-        quoteResponse: q2,
-      }),
-    }).then((r) => r.json()),
+    JSON.parse(
+      `{"tokenLedgerInstruction":null,"computeBudgetInstructions":[{"programId":"ComputeBudget111111111111111111111111111111","accounts":[],"data":"AsBcFQA="}],"setupInstructions":[{"programId":"11111111111111111111111111111111","accounts":[{"pubkey":"Cm7vjoV12JuVqCduW6rkGGcgN77NPkzqZr66pkVTzb5b","isSigner":true,"isWritable":true},{"pubkey":"FkHuP6FSfa8x1WY43U224RU7d9yLodB3XEeNAytX68ZB","isSigner":false,"isWritable":true}],"data":"AgAAAMQlEwMAAAAA"},{"programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA","accounts":[{"pubkey":"FkHuP6FSfa8x1WY43U224RU7d9yLodB3XEeNAytX68ZB","isSigner":false,"isWritable":true}],"data":"EQ=="}],"swapInstruction":{"programId":"JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4","accounts":[{"pubkey":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA","isSigner":false,"isWritable":false},{"pubkey":"Cm7vjoV12JuVqCduW6rkGGcgN77NPkzqZr66pkVTzb5b","isSigner":true,"isWritable":false},{"pubkey":"FkHuP6FSfa8x1WY43U224RU7d9yLodB3XEeNAytX68ZB","isSigner":false,"isWritable":true},{"pubkey":"2ecynoqxYJWM5McNv9qnLgLGRsGfzdjLHRmWEnyhPJZ4","isSigner":false,"isWritable":true},{"pubkey":"JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4","isSigner":false,"isWritable":false},{"pubkey":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","isSigner":false,"isWritable":false},{"pubkey":"JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4","isSigner":false,"isWritable":false},{"pubkey":"D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf","isSigner":false,"isWritable":false},{"pubkey":"JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4","isSigner":false,"isWritable":false},{"pubkey":"TessVdML9pBGgG9yGks7o4HewRaXVAMuoVj4x83GLQH","isSigner":false,"isWritable":false},{"pubkey":"8ekCy2jHHUbW2yeNGFWYJT9Hm9FW7SvZcZK66dSZCDiF","isSigner":false,"isWritable":false},{"pubkey":"FLckHLGMJy5gEoXWwcE68Nprde1D4araK4TGLw4pQq2n","isSigner":false,"isWritable":true},{"pubkey":"Cm7vjoV12JuVqCduW6rkGGcgN77NPkzqZr66pkVTzb5b","isSigner":false,"isWritable":false},{"pubkey":"5pVN5XZB8cYBjNLFrsBCPWkCQBan5K5Mq2dWGzwPgGJV","isSigner":false,"isWritable":true},{"pubkey":"9t4P5wMwfFkyn92Z7hf463qYKEZf8ERVZsGBEPNp8uJx","isSigner":false,"isWritable":true},{"pubkey":"FkHuP6FSfa8x1WY43U224RU7d9yLodB3XEeNAytX68ZB","isSigner":false,"isWritable":true},{"pubkey":"2ecynoqxYJWM5McNv9qnLgLGRsGfzdjLHRmWEnyhPJZ4","isSigner":false,"isWritable":true},{"pubkey":"So11111111111111111111111111111111111111112","isSigner":false,"isWritable":false},{"pubkey":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","isSigner":false,"isWritable":false},{"pubkey":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA","isSigner":false,"isWritable":false},{"pubkey":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA","isSigner":false,"isWritable":false},{"pubkey":"Sysvar1nstructions1111111111111111111111111","isSigner":false,"isWritable":false}],"data":"5RfLl3rjrSoBAAAAWQFkAAHEJRMDAAAAALmamAAAAAAAAAAA"},"cleanupInstruction":{"programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA","accounts":[{"pubkey":"FkHuP6FSfa8x1WY43U224RU7d9yLodB3XEeNAytX68ZB","isSigner":false,"isWritable":true},{"pubkey":"Cm7vjoV12JuVqCduW6rkGGcgN77NPkzqZr66pkVTzb5b","isSigner":false,"isWritable":true},{"pubkey":"Cm7vjoV12JuVqCduW6rkGGcgN77NPkzqZr66pkVTzb5b","isSigner":true,"isWritable":false}],"data":"CQ=="},"otherInstructions":[],"addressLookupTableAddresses":["9AKCoNoAGYLW71TwTHY9e7KrZUWWL3c7VtHKb66NT3EV"],"prioritizationFeeLamports":0,"computeUnitLimit":1400000,"prioritizationType":{"computeBudget":{"microLamports":0,"estimatedMicroLamports":455690}},"simulationSlot":null,"dynamicSlippageReport":null,"simulationError":null,"addressesByLookupTableAddress":null,"blockhashWithMetadata":{"blockhash":[87,211,67,96,245,90,161,252,17,109,11,96,45,119,55,75,170,156,154,200,154,7,138,247,124,75,232,33,2,125,77,248],"lastValidBlockHeight":354592018,"fetchedAt":{"secs_since_epoch":1761684298,"nanos_since_epoch":16046125}}}`,
+    ),
   ]);
 
-  const ixHumidi = toInstruction(respHumidi.swapInstruction);
-  const ixTess = toInstruction(respTess.swapInstruction);
-  if (!ixHumidi || !ixTess)
-    throw new Error("failed to build swap instructions");
+  // const ixHumidi = toInstruction(respHumidi.swapInstruction);
+  // const ixTess = toInstruction(respTess.swapInstruction);
+  // if (!ixHumidi || !ixTess)
+  const ixAtomicSwap = buildAtomicSwapTx(
+    respHumidi,
+    respTess,
+    q1.inAmount,
+    q2.outAmount - 100,
+  );
+  if (!ixAtomicSwap) throw new Error("failed to build swap instruction");
 
   // 4) Tip dynamique simple: 0.002–0.01 SOL selon le profit
   const profitUsd = profit / USDC_DECIMALS;
-  const lamportsTip =
-    profitUsd > 5 ? 10_000_000 : profitUsd > 2 ? 7_000_000 : 4_000_000; // ajuste à ta sauce
+  // const lamportsTip =
+  //   profitUsd > 5 ? 10_000_000 : profitUsd > 2 ? 7_000_000 : 4_000_000; // ajuste à ta sauce
+  const lamportsTip = 255_000;
 
   // 5) Envoi du bundle Jito (atomique, invisible au mempool public)
   const t2 = performance.now();
-  await sendArbBundle(connection, wallet, ixHumidi, ixTess, lamportsTip);
+  await sendArbBundle(connection, wallet, ixAtomicSwap, lamportsTip);
   const t3 = performance.now();
   log.info(
     `🚀 bundle sent | build ${(t2 - t1).toFixed(1)}ms | send ${(t3 - t2).toFixed(1)}ms`,
@@ -398,22 +432,22 @@ async function main() {
   await warmHumidiTemplate(wallet.publicKey.toBase58());
   await warmTesseraVTemplate(wallet.publicKey.toBase58());
 
-  const delay = 1800;
+  const delay = 2100;
   log.info(`🚀 Scanner toutes les ${delay}ms...`);
   let running = false;
 
   await checkArb(connection, wallet);
-  // setInterval(async () => {
-  //   if (running) return;
-  //   running = true;
-  //   try {
-  //     await checkArb(connection, wallet);
-  //   } catch (e: any) {
-  //     log.error(e?.message ?? e);
-  //   } finally {
-  //     running = false;
-  //   }
-  // }, delay);
+  setInterval(async () => {
+    if (running) return;
+    running = true;
+    try {
+      await checkArb(connection, wallet);
+    } catch (e: any) {
+      log.error(e?.message ?? e);
+    } finally {
+      running = false;
+    }
+  }, delay);
 }
 
 main()
