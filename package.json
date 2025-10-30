@@ -8,6 +8,7 @@
     "dev3": "ts-node --transpile-only src/index3.ts",
     "dev4": "ts-node --transpile-only src/index4.ts",
     "dev5": "ts-node --transpile-only src/index5.ts",
+    "jito": "ts-node --transpile-only src/jito.ts",
     "migrate": "prisma migrate dev",
     "generate": "prisma generate",
     "studio": "prisma studio"

@@ -3,14 +3,14 @@ import jupIdl from "../idl/jup_v6.json";
 import BN from "bn.js";
 
 export function encodeInstruction(
-  swapId: string,
+  swapId: number,
   inputAmount: number,
   outputAmount: number,
 ): Buffer {
   const coder = new BorshInstructionCoder(jupIdl as Idl);
   return coder.encode("route", {
     in_amount: new BN(inputAmount),
-    quoted_out_amount: new BN(0),
+    quoted_out_amount: new BN(outputAmount),
     slippage_bps: 0,
     platform_fee_bps: 0,
     positive_slippage_bps: 0,
